@@ -1,0 +1,182 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Pose Dataset Assembler — prototype</title>
+<style>
+body{font-family:system-ui,Helvetica,Arial;margin:16px;color:#222}
+#app{display:flex;gap:16px}
+#left{width:420px}
+textarea{width:100%;height:160px;font-family:monospace}
+canvas{border:1px solid #ccc;background:#fafafa;width:480px;height:360px}
+button{margin:4px 0}
+.small{font-size:0.9em;color:#555}
+</style>
+</head>
+<body>
+<h2>Pose Dataset Assembler — prototype</h2>
+<div id="app">
+  <div id="left">
+    <input id="file" type="file" />
+    <div>
+      <button id="example">Load example</button>
+      <button id="exportJson">Download standardized JSON</button>
+      <button id="exportCsv">Download standardized CSV</button>
+    </div>
+    <p class="small">Drop a CSV or JSON with time, modules (id,x,y,z,yaw,pitch,roll), or simple joint states. This demo uses heuristic field mapping.</p>
+    <textarea id="raw" placeholder='Raw file or example appears here'></textarea>
+    <h4>Normalized (first 3 frames)</h4>
+    <pre id="norm" style="height:160px;overflow:auto;background:#fff;border:1px solid #eee;padding:8px"></pre>
+  </div>
+  <div id="right">
+    <canvas id="cv" width="480" height="360"></canvas>
+    <div id="controls"></div>
+  </div>
+</div>
+<script>
+// Simple heuristic normalizer and preview
+const example = {
+  meta:{source:"example",note:"two modules, three frames"},
+  frames:[
+    {t:0, modules:[{id:"A",x:20,y:40,z:0,yaw:0},{id:"B",x:120,y:80,z:0,yaw:30}]},
+    {t:1, modules:[{id:"A",x:40,y:60,z:0,yaw:10},{id:"B",x:140,y:60,z:0,yaw:20}]},
+    {t:2, modules:[{id:"A",x:70,y:90,z:0,yaw:20},{id:"B",x:160,y:40,z:0,yaw:10}]}
+  ]
+};
+
+function guessAndNormalize(data){
+  // If already standardized
+  if(data && data.frames && Array.isArray(data.frames)) return data;
+  // If array of rows (CSV parsed) where rows have columns like time,id,x,y,z,yaw
+  if(Array.isArray(data)){
+    const framesMap = new Map();
+    data.forEach(row=>{
+      const t = Number(row.time ?? row.t ?? row.timestamp ?? row.ts ?? 0);
+      const id = String(row.id ?? row.module ?? 'm');
+      const x = Number(row.x ?? row.pos_x ?? row.px ?? 0);
+      const y = Number(row.y ?? row.pos_y ?? row.py ?? 0);
+      const z = Number(row.z ?? 0);
+      const yaw = Number(row.yaw ?? row.theta ?? 0);
+      if(!framesMap.has(t)) framesMap.set(t, []);
+      framesMap.get(t).push({id,x,y,z,yaw});
+    });
+    const frames = Array.from(framesMap.entries()).sort((a,b)=>a[0]-b[0]).map(([t,modules])=>({t,modules}));
+    return {meta:{source:'csv/rows'},frames};
+  }
+  // If object has frames-like under other keys
+  if(data && data.timeline && Array.isArray(data.timeline)){
+    return {meta:{source:'timeline'},frames:data.timeline.map((f,i)=>({t:f.time??i,modules:f.modules||[]}))};
+  }
+  // Fallback: wrap single pose
+  if(data && data.modules) return {meta:{source:'wrapped'},frames:[{t:0,modules:data.modules}]};
+  // Unknown
+  return {meta:{source:'unknown'},frames:[]};
+}
+
+function csvParse(text){
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if(lines.length<1) return [];
+  const cols = lines[0].split(/,/) ;
+  return lines.slice(1).map(l=>{
+    const vals = l.split(/,/);
+    const obj = {};
+    cols.forEach((c,i)=>obj[c.trim()]=vals[i]===undefined?"":vals[i].trim());
+    return obj;
+  });
+}
+
+const fileEl=document.getElementById('file');
+const raw=document.getElementById('raw');
+const normEl=document.getElementById('norm');
+const cv=document.getElementById('cv');
+const ctx=cv.getContext('2d');
+let state={standard:null,frameIdx:0};
+
+fileEl.onchange = e=>{
+  const f=e.target.files[0];
+  if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{
+    raw.value=r.result;
+    try{ onLoadText(r.result);}catch(err){alert('Parse error '+err)}
+  };
+  r.readAsText(f);
+};
+
+function onLoadText(text){
+  let parsed;
+  try{ parsed = JSON.parse(text); }
+  catch(e){ parsed = csvParse(text); }
+  const std = guessAndNormalize(parsed);
+  state.standard=std;
+  state.frameIdx=0;
+  renderNorm();
+  renderFrame();
+}
+
+document.getElementById('example').onclick = ()=>{
+  raw.value = JSON.stringify(example, null, 2);
+  state.standard = example;
+  state.frameIdx = 0;
+  renderNorm(); renderFrame();
+};
+
+document.getElementById('exportJson').onclick = ()=>{
+  if(!state.standard) return alert('Load data first');
+  const blob = new Blob([JSON.stringify(state.standard,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='standardized.json'; a.click(); URL.revokeObjectURL(url);
+};
+
+document.getElementById('exportCsv').onclick = ()=>{
+  if(!state.standard) return alert('Load data first');
+  // flatten: rows of time,id,x,y,z,yaw
+  const rows=['time,id,x,y,z,yaw'];
+  state.standard.frames.forEach(f=>{
+    f.modules.forEach(m=>rows.push([f.t,m.id,m.x,m.y,m.z,m.yaw].join(',')));
+  });
+  const blob = new Blob([rows.join('\n')],{type:'text/csv'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='standardized.csv'; a.click(); URL.revokeObjectURL(url);
+};
+
+function renderNorm(){
+  if(!state.standard){ normEl.textContent='(no data)'; return}
+  const preview = JSON.stringify({meta:state.standard.meta,frames:state.standard.frames.slice(0,3)},null,2);
+  normEl.textContent = preview;
+}
+
+function renderFrame(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!state.standard || !state.standard.frames.length) return;
+  const f = state.standard.frames[state.frameIdx || 0];
+  // simple scaling
+  const pad=20; const W=cv.width-2*pad; const H=cv.height-2*pad;
+  // compute bounds
+  const xs=f.modules.map(m=>m.x); const ys=f.modules.map(m=>m.y);
+  const minx=Math.min(...xs,0), maxx=Math.max(...xs,100);
+  const miny=Math.min(...ys,0), maxy=Math.max(...ys,100);
+  const sx = (v)=> pad + ((v-minx)/(maxx-minx||1))*W;
+  const sy = (v)=> pad + ((v-miny)/(maxy-miny||1))*H;
+  f.modules.forEach(m=>{
+    const x=sx(m.x); const y=sy(m.y);
+    ctx.fillStyle='orange'; ctx.beginPath(); ctx.arc(x,y,8,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='black'; ctx.font='12px sans-serif'; ctx.fillText(m.id+' ('+ (m.x|0)+','+(m.y|0)+')', x+10, y+4);
+  });
+  document.getElementById('controls').innerHTML = '<div class="small">Frame '+state.frameIdx+' (t='+ (f.t ?? state.frameIdx) +')</div>'+
+    (f.modules.map((m,mi)=>'<div class="small">'+m.id+': yaw '+(m.yaw||0)+'°</div>').join(''))+
+    '<div style="margin-top:6px"><button id="prev">◀ Prev</button> <button id="next">Next ▶</button></div>';
+  document.getElementById('prev').onclick = ()=>{ state.frameIdx = Math.max(0,state.frameIdx-1); renderFrame(); renderNorm(); };
+  document.getElementById('next').onclick = ()=>{ state.frameIdx = Math.min(state.standard.frames.length-1,state.frameIdx+1); renderFrame(); renderNorm(); };
+}
+
+// If user pastes into textarea and presses Ctrl+Enter, load it
+raw.addEventListener('keydown',e=>{ if(e.ctrlKey&&e.key==='Enter'){ onLoadText(raw.value); } });
+
+// initial example
+raw.value = JSON.stringify(example, null, 2);
+state.standard = example;
+renderNorm(); renderFrame();
+</script>
+</body>
+</html>
